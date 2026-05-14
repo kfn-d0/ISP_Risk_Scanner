@@ -2,6 +2,8 @@
 
 Uma projeto para análise técnica da superfície de exposição pública de Sistemas Autônomos (ASN). Focada em **Inteligência de Fontes Abertas (OSINT)** e coleta passiva de dados.
 
+<img width="623" height="675" alt="image" src="https://github.com/user-attachments/assets/a51ac7bd-105a-4460-aac1-efdd7a4904ba" />
+
 ---
 
 ## Como Executar (Quick Start)
