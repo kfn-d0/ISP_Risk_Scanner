@@ -3,11 +3,13 @@ import os
 import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
 import uvicorn
 import re
 import logging
+import io
+import csv
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,9 +20,10 @@ logger = logging.getLogger(__name__)
 from core.asn_lookup import get_asn_prefixes, get_asn_info
 from core.passive_collector import collect_passive_data
 from core.risk_engine import calculate_risk
-from core.db import init_db, save_scan
+from core.db import init_db, save_scan, get_latest_scans
 from core.dork_generator import generate_google_dorks
 from core.subdomain_discovery import discover_subdomains, extract_main_domain
+from core.models import ScanResult
 
 from contextlib import asynccontextmanager
 
@@ -126,7 +129,7 @@ async def websocket_analyze(websocket: WebSocket):
         except:
             pass
 
-@app.post("/api/analyze")
+@app.post("/api/analyze", response_model=ScanResult)
 async def analyze_asn(req: AnalyzeRequest):
     start_time = time.time()
     asn = req.asn
@@ -137,6 +140,67 @@ async def analyze_asn(req: AnalyzeRequest):
     results = calculate_risk(collected_data, asn, total_time)
     await asyncio.to_thread(save_scan, asn, results["metrics"]["total_ips"], results["metrics"]["total_score"], results)
     return results
+
+@app.get("/api/export/json/{asn}")
+async def export_json(asn: str):
+    scans = await asyncio.to_thread(get_latest_scans, asn, 1)
+    if not scans:
+        return JSONResponse(status_code=404, content={"message": "No scans found for this ASN"})
+    return JSONResponse(content=scans[0])
+
+@app.get("/api/export/csv/{asn}")
+async def export_csv(asn: str):
+    scans = await asyncio.to_thread(get_latest_scans, asn, 1)
+    if not scans:
+        return JSONResponse(status_code=404, content={"message": "No scans found for this ASN"})
+
+    data = scans[0]
+    raw_data = data.get("raw_data", [])
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow(["IP", "Prefix", "Port", "Service", "Risk Level", "Banner"])
+
+    for item in raw_data:
+        writer.writerow([
+            item.get("ip", ""),
+            item.get("prefix", ""),
+            item.get("port", ""),
+            item.get("service", ""),
+            item.get("risk_level", ""),
+            item.get("banner", "")
+        ])
+
+    csv_string = output.getvalue()
+
+    return Response(
+        content=csv_string,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=scan_{asn}.csv"}
+    )
+
+@app.get("/api/diff/{asn}")
+async def diff_scans(asn: str):
+    scans = await asyncio.to_thread(get_latest_scans, asn, 2)
+    if len(scans) < 2:
+        return JSONResponse(status_code=400, content={"message": "Not enough historical scans to compute diff (requires at least 2)."})
+
+    latest_scan = scans[0]
+    previous_scan = scans[1]
+
+    latest_exposures = {f"{item.get('ip')}:{item.get('port')}": item for item in latest_scan.get("raw_data", [])}
+    previous_exposures = {f"{item.get('ip')}:{item.get('port')}": item for item in previous_scan.get("raw_data", [])}
+
+    new_exposures = []
+    for key, item in latest_exposures.items():
+        if key not in previous_exposures:
+            new_exposures.append(item)
+
+    return JSONResponse(content={
+        "new_exposures_count": len(new_exposures),
+        "new_exposures": new_exposures
+    })
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,8 +1,15 @@
 import httpx
 import logging
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
 logger = logging.getLogger(__name__)
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+    reraise=False
+)
 async def get_asn_prefixes(asn: str) -> list[str]:
     asn_number = asn.upper().replace("AS", "")
     url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource={asn_number}"
@@ -28,6 +35,12 @@ async def get_asn_prefixes(asn: str) -> list[str]:
         logger.error(f"[ASN Lookup] Erro inesperado para AS{asn_number}: {e}")
         return []
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+    reraise=False
+)
 async def get_asn_info(asn: str) -> dict:
     asn_number = asn.upper().replace("AS", "")
     url = f"https://stat.ripe.net/data/as-overview/data.json?resource={asn_number}"

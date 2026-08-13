@@ -5,6 +5,7 @@ import ipaddress
 import asyncio
 import logging
 from typing import Callable, Any
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,12 @@ KNOWN_SERVICES = {
     8443: "HTTPS (Alt)", 45666: "HTTP", 161: "SNMP"
 }
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException)),
+    reraise=False
+)
 async def get_alienvault_intel(client: httpx.AsyncClient, ip_str: str) -> str:
     try:
         url = f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ip_str}/general"
@@ -33,51 +40,65 @@ async def get_alienvault_intel(client: httpx.AsyncClient, ip_str: str) -> str:
         logger.warning(f"Erro inesperado no OTX para {ip_str}: {e}")
     return ""
 
-async def scan_single_ip(client: httpx.AsyncClient, semaphore: asyncio.Semaphore, ip_str: str, prefix: str) -> list[dict]:
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException)),
+    reraise=False
+)
+async def _do_scan_single_ip(client: httpx.AsyncClient, ip_str: str, prefix: str) -> list[dict]:
     local_results = []
+    try:
+        url = f"https://internetdb.shodan.io/{ip_str}"
+        resp = await client.get(url, timeout=6)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            ports = data.get("ports", [])
+            hostnames = data.get("hostnames", [])
+            cpes = data.get("cpes", [])
+            vulns = data.get("vulns", [])
+            
+            if ports:
+                otx_intel = await get_alienvault_intel(client, ip_str)
+                
+                detalhes = []
+                if hostnames: detalhes.append(f"Host: {hostnames[0]}")
+                if cpes: detalhes.append(f"CPEs: {', '.join(cpes[:2])}")
+                if vulns: detalhes.append(f"CVEs: {len(vulns)}")
+                if otx_intel: detalhes.append(otx_intel)
+
+                banner_str = " | ".join(detalhes) if detalhes else "Status Ativo Confirmado (Desconhecido)"
+
+                for port in ports:
+                    service_name = KNOWN_SERVICES.get(port)
+                    service_format = f"{port} ({service_name})" if service_name else str(port)
+                    local_results.append({
+                        "ip": data.get("ip"),
+                        "port": port,
+                        "service": service_format,
+                        "banner": banner_str[:120],
+                        "prefix": prefix,
+                        "simulated": False,
+                        "vulns_count": len(vulns),
+                        "has_otx": bool(otx_intel)
+                    })
+    except httpx.TimeoutException:
+        logger.debug(f"Timeout na varredura do IP {ip_str}")
+        raise
+    except httpx.RequestError as e:
+        logger.debug(f"Falha de rede na varredura do IP {ip_str}: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Erro inesperado na varredura do IP {ip_str}: {e}")
+    return local_results
+
+async def scan_single_ip(client: httpx.AsyncClient, semaphore: asyncio.Semaphore, ip_str: str, prefix: str) -> list[dict]:
     async with semaphore:
         try:
-            url = f"https://internetdb.shodan.io/{ip_str}"
-            resp = await client.get(url, timeout=6)
-            
-            if resp.status_code == 200:
-                data = resp.json()
-                ports = data.get("ports", [])
-                hostnames = data.get("hostnames", [])
-                cpes = data.get("cpes", [])
-                vulns = data.get("vulns", [])
-                
-                if ports:
-                    otx_intel = await get_alienvault_intel(client, ip_str)
-                    
-                    detalhes = []
-                    if hostnames: detalhes.append(f"Host: {hostnames[0]}")
-                    if cpes: detalhes.append(f"CPEs: {', '.join(cpes[:2])}")
-                    if vulns: detalhes.append(f"CVEs: {len(vulns)}")
-                    if otx_intel: detalhes.append(otx_intel)
-                    
-                    banner_str = " | ".join(detalhes) if detalhes else "Status Ativo Confirmado (Desconhecido)"
-                    
-                    for port in ports:
-                        service_name = KNOWN_SERVICES.get(port)
-                        service_format = f"{port} ({service_name})" if service_name else str(port)
-                        local_results.append({
-                            "ip": data.get("ip"),
-                            "port": port,
-                            "service": service_format,
-                            "banner": banner_str[:120],
-                            "prefix": prefix,
-                            "simulated": False,
-                            "vulns_count": len(vulns),
-                            "has_otx": bool(otx_intel)
-                        })
-        except httpx.TimeoutException:
-            logger.debug(f"Timeout na varredura do IP {ip_str}")
-        except httpx.RequestError as e:
-            logger.debug(f"Falha de rede na varredura do IP {ip_str}: {e}")
-        except Exception as e:
-            logger.error(f"Erro inesperado na varredura do IP {ip_str}: {e}")
-    return local_results
+            return await _do_scan_single_ip(client, ip_str, prefix)
+        except Exception:
+            return []
 
 async def query_shodan_asn(client: httpx.AsyncClient, asn: str, api_key: str, progress_callback: Callable = None) -> list[dict]:
     results = []
