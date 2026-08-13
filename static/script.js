@@ -1,6 +1,8 @@
 let portsChartInstance = null;
 let currentScanData = null;
 let ws = null;
+let currentPage = 1;
+const itemsPerPage = 50;
 
 function escapeHTML(str) {
     if (typeof str !== 'string') return str;
@@ -142,7 +144,17 @@ function renderDashboard(data) {
         <td><span style="background: rgba(0,255,136,0.1); color: var(--primary); padding: 2px 8px; border-radius: 12px">${item.count}</span></td>
     `);
 
-    populateTable('raw-table', data.raw_data, (item) => {
+    currentPage = 1;
+    updateRawTable();
+}
+
+function updateRawTable() {
+    if (!currentScanData || !currentScanData.raw_data) return;
+    const start = (currentPage - 1) * itemsPerPage;
+    const end = start + itemsPerPage;
+    const paginatedData = currentScanData.raw_data.slice(start, end);
+
+    populateTable('raw-table', paginatedData, (item) => {
         const trClass = `risk-${item.risk_level.toLowerCase()}`;
         return `
         <td>${escapeHTML(item.ip)}</td>
@@ -153,10 +165,28 @@ function renderDashboard(data) {
         <td>
             <details style="cursor: pointer; font-size: 0.85em;">
                 <summary style="outline: none; color: var(--secondary);">Detalhar</summary>
-                <div style="margin-top: 5px; color: var(--text-muted); padding: 5px; background: rgba(0,0,0,0.2); border-radius: 4px; max-width: 300px; white-space: pre-wrap;">${escapeHTML(item.banner)}</div>
+                <div style="margin-top:5px; padding:5px; background: rgba(0,0,0,0.1); border-radius:4px;">
+                    ${escapeHTML(item.banner)}<br>
+                    <small>Vulnerabilidades: ${item.vulns_count} | OTX Threat Intel: ${item.has_otx ? 'Sim' : 'Não'}</small>
+                </div>
             </details>
         </td>
-    `});
+        `;
+    });
+
+    const maxPage = Math.ceil(currentScanData.raw_data.length / itemsPerPage);
+    document.getElementById('page-info').textContent = `Página ${currentPage} de ${maxPage || 1}`;
+    document.getElementById('prev-btn').disabled = currentPage === 1;
+    document.getElementById('next-btn').disabled = currentPage >= maxPage;
+}
+
+function changePage(delta) {
+    if (!currentScanData) return;
+    const maxPage = Math.ceil(currentScanData.raw_data.length / itemsPerPage);
+    currentPage += delta;
+    if (currentPage < 1) currentPage = 1;
+    if (currentPage > maxPage) currentPage = maxPage;
+    updateRawTable();
 }
 
 function renderChart(portData) {
@@ -394,4 +424,44 @@ if (savedTheme === 'dark-theme') {
     const themeText = document.getElementById('theme-text');
     if (themeIcon) themeIcon.textContent = 'O';
     if (themeText) themeText.textContent = 'Modo Claro';
+}
+
+async function exportData(format) {
+    if (!currentScanData || !currentScanData.asn) return;
+    try {
+        const response = await fetch(`/api/export/${format}/${currentScanData.asn}`);
+        if (!response.ok) {
+            alert('Falha ao exportar os dados.');
+            return;
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `scan_${currentScanData.asn}.${format}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    } catch (e) {
+        console.error("Erro na exportação:", e);
+        alert('Erro ao tentar exportar.');
+    }
+}
+
+async function compareScans() {
+    if (!currentScanData || !currentScanData.asn) return;
+    try {
+        const response = await fetch(`/api/diff/${currentScanData.asn}`);
+        if (!response.ok) {
+            const err = await response.json();
+            alert(err.message || 'Erro ao comparar scans.');
+            return;
+        }
+        const data = await response.json();
+        alert(`Comparação concluída!\nNovas exposições encontradas (em relação ao scan anterior): ${data.new_exposures_count}`);
+    } catch (e) {
+        console.error("Erro na comparação:", e);
+        alert('Erro ao tentar comparar os scans.');
+    }
 }

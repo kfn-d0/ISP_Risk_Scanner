@@ -31,3 +31,23 @@ def save_scan(asn: str, total_ips: int, total_score: int, results: dict):
     ''', (asn, datetime.now().isoformat(), total_ips, total_score, json.dumps(results)))
     conn.commit()
     conn.close()
+
+def get_latest_scans(asn: str, limit: int = 1) -> list[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT results_json FROM scans
+        WHERE asn = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+    ''', (asn, limit))
+    rows = cursor.fetchall()
+    conn.close()
+
+    results = []
+    for row in rows:
+        try:
+            results.append(json.loads(row[0]))
+        except json.JSONDecodeError:
+            continue
+    return results

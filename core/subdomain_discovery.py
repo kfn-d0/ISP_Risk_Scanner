@@ -2,9 +2,16 @@ import httpx
 import logging
 import re
 from typing import Set
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
 logger = logging.getLogger(__name__)
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException)),
+    reraise=False
+)
 async def discover_subdomains(domain: str) -> Set[str]:
     """
     Realiza a descoberta passiva de subdomínios usando logs de transparência de certificados (crt.sh).
